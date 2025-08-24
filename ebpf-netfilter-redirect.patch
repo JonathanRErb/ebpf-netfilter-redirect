@@ -1,124 +1,137 @@
-diff -ruN linux-6.8.10/include/linux/skbuff.h linux-6.8.10_patched/include/linux/skbuff.h
---- linux-6.8.10/include/linux/skbuff.h	2024-05-17 10:15:12.000000000 +0000
-+++ linux-6.8.10_patched/include/linux/skbuff.h	2024-05-22 17:08:33.939072096 +0000
-@@ -984,6 +984,7 @@
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -974,6 +974,7 @@ struct sk_buff {
  #ifdef CONFIG_NET_REDIRECT
  	__u8			from_ingress:1;
  #endif
-+        __u8                    reinjected:1;
++	__u8                    reinjected:1;
  #ifdef CONFIG_NETFILTER_SKIP_EGRESS
  	__u8			nf_skip_egress:1;
  #endif
-diff -ruN linux-6.8.10/include/uapi/linux/netfilter.h linux-6.8.10_patched/include/uapi/linux/netfilter.h
---- linux-6.8.10/include/uapi/linux/netfilter.h	2024-05-17 10:15:12.000000000 +0000
-+++ linux-6.8.10_patched/include/uapi/linux/netfilter.h	2024-05-22 16:47:38.939133315 +0000
-@@ -45,6 +45,8 @@
+--- a/include/uapi/linux/netfilter.h
++++ b/include/uapi/linux/netfilter.h
+@@ -45,6 +45,8 @@ enum nf_inet_hooks {
  	NF_INET_FORWARD,
  	NF_INET_LOCAL_OUT,
  	NF_INET_POST_ROUTING,
-+        NF_INET_REDIRECT_INGRESS, //Custom ingress handler hook
-+        NF_INET_REDIRECT_EGRESS, //Custom egress handler hook
++	NF_INET_REDIRECT_INGRESS, //Custom ingress handler hook
++	NF_INET_REDIRECT_EGRESS, //Custom egress handler hook
  	NF_INET_NUMHOOKS,
  	NF_INET_INGRESS = NF_INET_NUMHOOKS,
  };
-diff -ruN linux-6.8.10/net/core/dev.c linux-6.8.10_patched/net/core/dev.c
---- linux-6.8.10/net/core/dev.c	2024-05-17 10:15:12.000000000 +0000
-+++ linux-6.8.10_patched/net/core/dev.c	2024-05-22 17:11:38.670448464 +0000
-@@ -264,6 +264,26 @@
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -291,6 +291,27 @@ static struct netdev_name_node *netdev_n
  	return name_node;
  }
  
++
 +static int redirect_tc_ingress(struct net *net, struct sock *sk, struct sk_buff *skb)
 +{
-+        //printk(KERN_INFO "Enter redirect_tc_ingress\n");
-+        skb->protocol = eth_type_trans(skb, skb->dev);
-+                  skb->reinjected = 1; //Mark as re-injected
-+        local_bh_disable();
-+        netif_rx(skb);
-+        local_bh_enable();
-+        return 0;
++	//printk(KERN_INFO "Enter redirect_tc_ingress\n");
++	skb->protocol = eth_type_trans(skb, skb->dev);
++	skb->reinjected = 1; //Mark as re-injected
++	local_bh_disable();
++	netif_rx(skb);
++	local_bh_enable();
++	return 0;
 +}
 +
 +static int redirect_tc_egress(struct net *net, struct sock *sk, struct sk_buff *skb)
 +{
-+        //printk(KERN_INFO "Enter redirect_tc_egress\n");
-+        skb->reinjected = 1; //Mark as re-injected
-+        dev_queue_xmit(skb);
-+        return 0;
++	//printk(KERN_INFO "Enter redirect_tc_egress\n");
++	skb->reinjected = 1; //Mark as re-injected
++	dev_queue_xmit(skb);
++	return 0;
 +}
 +
 +
  static struct netdev_name_node *
  netdev_name_node_head_alloc(struct net_device *dev)
  {
-@@ -4018,7 +4038,31 @@
+@@ -4051,6 +4072,7 @@ sch_handle_ingress(struct sk_buff *skb,
+ {
+ 	struct bpf_mprog_entry *entry = rcu_dereference_bh(skb->dev->tcx_ingress);
+ 	int sch_ret;
++	int ret_hook = 0;
+ 
+ 	if (!entry)
+ 		return skb;
+@@ -4075,7 +4097,30 @@ ingress_verdict:
  		 * push the L2 header back before redirecting to another
  		 * netdev.
  		 */
 +
-+                //If the packet was already re-injected let it continue normally
-+                if(skb->reinjected) {
-+                        break;
-+                }
++		//If the packet was already re-injected let it continue normally
++		if(skb->reinjected) {
++			break;
++		}
 +
  		__skb_push(skb, skb->mac_len);
 +
-+                int ret_hook = NF_HOOK(NFPROTO_IPV4,
-+                                NF_INET_REDIRECT_INGRESS,
-+                                &init_net,
-+                                //dev_net(skb->dev),
-+                                NULL,
-+                                skb,
-+                                skb->dev,
-+                                NULL,
-+                                redirect_tc_ingress);
++		ret_hook = NF_HOOK(NFPROTO_IPV4,
++					NF_INET_REDIRECT_INGRESS,
++					&init_net,
++					//dev_net(skb->dev),
++					NULL,
++					skb,
++					skb->dev,
++					NULL,
++					redirect_tc_ingress);
 +
-+                if(ret_hook != 1) {
-+                        //Packet was consumed by hook
-+                        *ret = NET_RX_SUCCESS;
-+                        return NULL;
-+                }
-+
++		if(ret_hook != 1) {
++			//Packet was consumed by hook
++			*ret = NET_RX_SUCCESS;
++			return NULL;
++		}
 +
  		if (skb_do_redirect(skb) == -EAGAIN) {
  			__skb_pull(skb, skb->mac_len);
  			*another = true;
-@@ -4067,6 +4111,29 @@
+@@ -4106,6 +4151,7 @@ sch_handle_egress(struct sk_buff *skb, i
+ {
+ 	struct bpf_mprog_entry *entry = rcu_dereference_bh(dev->tcx_egress);
+ 	int sch_ret;
++	int ret_hook = 0;
+ 
+ 	if (!entry)
+ 		return skb;
+@@ -4123,6 +4169,29 @@ egress_verdict:
  	switch (sch_ret) {
  	case TC_ACT_REDIRECT:
  		/* No need to push/pop skb's mac_header here on egress! */
 +
-+                //If the packet was already re-injected let it continue normally
-+                if(skb->reinjected) {
-+                        break;
-+                }
++		//If the packet was already re-injected let it continue normally
++		if(skb->reinjected) {
++			break;
++		}
 +
-+                int ret_hook = NF_HOOK(NFPROTO_IPV4,
-+                                NF_INET_REDIRECT_EGRESS,
-+                                &init_net,
-+                                //dev_net(skb->dev),
-+                                NULL,
-+                                skb,
-+                                skb->dev,
-+                                NULL,
-+                                redirect_tc_egress);
++		ret_hook = NF_HOOK(NFPROTO_IPV4,
++				NF_INET_REDIRECT_EGRESS,
++				&init_net,
++				//dev_net(skb->dev),
++				NULL,
++				skb,
++				skb->dev,
++				NULL,
++				redirect_tc_egress);
 +
-+                if(ret_hook != 1) {
-+                        //Packet was consumed by hook
-+                        *ret = NET_XMIT_SUCCESS;
-+                        return NULL;
-+                }
++		if(ret_hook != 1) {
++			//Packet was consumed by hook
++			*ret = NET_XMIT_SUCCESS;
++			return NULL;
++		}
 +
 +
  		skb_do_redirect(skb);
  		*ret = NET_XMIT_SUCCESS;
  		return NULL;
-@@ -5379,6 +5446,9 @@
+@@ -5456,6 +5525,9 @@ another_round:
  	if (pfmemalloc)
  		goto skip_taps;
  
-+        if(skb->reinjected)
-+                goto skip_taps;
++	if(skb->reinjected)
++		goto skip_taps;
 +
  	list_for_each_entry_rcu(ptype, &ptype_all, list) {
  		if (pt_prev)
